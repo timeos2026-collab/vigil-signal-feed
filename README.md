@@ -5,6 +5,7 @@ VIGIL provides a high-fidelity, real-time signal feed for the Oil & Gas industry
 ## Project Structure
 
 - `backend/`: Node.js/TypeScript API
+- `ingestion/`: Ingestion worker for raw signal detection
 - `supabase/`: Supabase configuration and database migrations
 
 ## Getting Started
@@ -26,3 +27,9 @@ VIGIL provides a high-fidelity, real-time signal feed for the Oil & Gas industry
    ```bash
    supabase init
    ```
+/home/engine/.bashrc: line 1: syntax error near unexpected token `('
+/home/engine/.bashrc: line 1: `. /etc/profile.d/workload-containment.shn# ~/.bashrc: executed by bash(1) for non-login shells.'
+/home/engine/.bashrc: line 1: syntax error near unexpected token `('
+/home/engine/.bashrc: line 1: `. /etc/profile.d/workload-containment.shn# ~/.bashrc: executed by bash(1) for non-login shells.'
+/home/engine/.bashrc: line 1: syntax error near unexpected token `('
+/home/engine/.bashrc: line 1: `. /etc/profile.d/workload-containment.shn# ~/.bashrc: executed by bash(1) for non-login shells.'
