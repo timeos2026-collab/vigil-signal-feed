@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Activity, MapPin, Shield, Filter, RefreshCw, Box } from 'lucide-react';
+import { Activity, MapPin, Shield, Filter, RefreshCw, Box, Zap, Search, AlertTriangle, User } from 'lucide-react';
 
 interface Signal {
   id: string;
@@ -9,14 +9,18 @@ interface Signal {
   region: string;
   asset_identifier: string;
   raw_payload: any;
+  is_discovery?: boolean;
 }
 
 const App: React.FC = () => {
   const [signals, setSignals] = useState<Signal[]>([]);
+  const [archetype, setArchetype] = useState<string>('The Generalist');
+  const [summarization, setSummarization] = useState<string>('Detailed');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [regionFilter, setRegionFilter] = useState('');
   const [commodityFilter, setCommodityFilter] = useState('');
+  const [personalized, setPersonalized] = useState(true);
 
   const fetchSignals = async () => {
     setLoading(true);
@@ -24,6 +28,15 @@ const App: React.FC = () => {
       const params = new URLSearchParams();
       if (regionFilter) params.append('region', regionFilter);
       if (commodityFilter) params.append('commodity', commodityFilter);
+      if (personalized) params.append('personalized', 'true');
+      
+      // Tempo Matching Params
+      params.append('deviceType', window.innerWidth < 768 ? 'Mobile' : 'Desktop');
+      const hour = new Date().getHours();
+      let timeState = 'Trading';
+      if (hour < 9) timeState = 'Pre-Market';
+      if (hour > 17) timeState = 'Post-Market';
+      params.append('timeState', timeState);
 
       const response = await fetch(`http://localhost:3000/api/signals?${params.toString()}`, {
         headers: {
@@ -34,7 +47,9 @@ const App: React.FC = () => {
       if (!response.ok) throw new Error('Failed to fetch signals');
       
       const data = await response.json();
-      setSignals(data);
+      setSignals(data.signals || []);
+      setArchetype(data.archetype || 'The Generalist');
+      setSummarization(data.summarization || 'Detailed');
       setError(null);
     } catch (err: any) {
       setError(err.message);
@@ -47,19 +62,63 @@ const App: React.FC = () => {
     fetchSignals();
     const interval = setInterval(fetchSignals, 10000); // Auto-refresh every 10s
     return () => clearInterval(interval);
-  }, [regionFilter, commodityFilter]);
+  }, [regionFilter, commodityFilter, personalized]);
+
+  const logInteraction = async (signalId: string, type: string, isDiscovery?: boolean) => {
+    try {
+      await fetch('http://localhost:3000/api/interactions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer local-dev-token'
+        },
+        body: JSON.stringify({
+          signal_id: signalId,
+          interaction_type: type,
+          is_discovery: isDiscovery
+        })
+      });
+    } catch (err) {
+      console.error('Failed to log interaction', err);
+    }
+  };
+
+  const getArchetypeIcon = () => {
+    switch (archetype) {
+      case 'The Hunter': return <Zap className="text-amber-400" size={20} />;
+      case 'The Strategist': return <Search className="text-blue-400" size={20} />;
+      case 'The Guardian': return <Shield className="text-red-400" size={20} />;
+      default: return <User className="text-slate-400" size={20} />;
+    }
+  };
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 p-8 font-sans">
+    <div className={`min-h-screen bg-slate-950 text-slate-100 p-8 font-sans ${archetype === 'The Hunter' ? 'text-xs' : ''}`}>
       <header className="flex justify-between items-center mb-8 border-b border-slate-800 pb-6">
         <div>
           <h1 className="text-3xl font-bold flex items-center gap-3">
             <Activity className="text-emerald-500" size={32} />
             VIGIL Signal Feed
           </h1>
-          <p className="text-slate-400 mt-1">Real-time Oil & Gas Market Intelligence</p>
+          <div className="flex items-center gap-2 mt-2">
+            <div className="flex items-center gap-1 bg-slate-900 border border-slate-800 px-2 py-1 rounded text-xs">
+              {getArchetypeIcon()}
+              <span className="font-semibold">{archetype}</span>
+            </div>
+            <span className="text-slate-500 text-xs">•</span>
+            <span className="text-slate-400 text-xs italic">Tempo: {summarization} Summarization</span>
+          </div>
         </div>
-        <div className="flex gap-4">
+        <div className="flex gap-4 items-center">
+          <div className="flex items-center gap-2 mr-4">
+            <label className="text-xs text-slate-400">Personalized</label>
+            <input 
+              type="checkbox" 
+              checked={personalized} 
+              onChange={() => setPersonalized(!personalized)}
+              className="w-4 h-4 accent-emerald-500"
+            />
+          </div>
           <div className="flex items-center gap-2 bg-slate-900 border border-slate-800 rounded-lg px-3 py-2">
             <Filter size={18} className="text-slate-500" />
             <select 
@@ -119,16 +178,28 @@ const App: React.FC = () => {
                   <th className="px-6 py-4 text-xs font-semibold uppercase tracking-wider text-slate-500">Commodity</th>
                   <th className="px-6 py-4 text-xs font-semibold uppercase tracking-wider text-slate-500">Confidence</th>
                   <th className="px-6 py-4 text-xs font-semibold uppercase tracking-wider text-slate-500">Region</th>
+                  <th className="px-6 py-4 text-xs font-semibold uppercase tracking-wider text-slate-500">Details</th>
                   <th className="px-6 py-4 text-xs font-semibold uppercase tracking-wider text-slate-500">Timestamp</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800">
                 {signals.map((signal) => (
-                  <tr key={signal.id} className="hover:bg-slate-800/50 transition-colors">
+                  <tr 
+                    key={signal.id} 
+                    className={`hover:bg-slate-800/50 transition-colors cursor-pointer ${signal.is_discovery ? 'bg-indigo-900/10' : ''}`}
+                    onClick={() => logInteraction(signal.id, 'deep_read', signal.is_discovery)}
+                  >
                     <td className="px-6 py-4">
                       <div className="flex items-center gap-3">
-                        <Box size={18} className="text-blue-500" />
-                        <span className="font-medium">{signal.asset_identifier}</span>
+                        <Box size={18} className={signal.is_discovery ? "text-indigo-400" : "text-blue-500"} />
+                        <span className="font-medium">
+                          {signal.asset_identifier}
+                          {signal.is_discovery && (
+                            <span className="ml-2 px-1.5 py-0.5 rounded-full bg-indigo-500/20 text-indigo-400 text-[10px] uppercase font-bold border border-indigo-500/30">
+                              Discovery
+                            </span>
+                          )}
+                        </span>
                       </div>
                     </td>
                     <td className="px-6 py-4">
@@ -147,11 +218,26 @@ const App: React.FC = () => {
                     <td className="px-6 py-4">
                       <div className="flex items-center gap-2">
                         <Shield size={14} className={parseFloat(signal.confidence_score) > 0.7 ? "text-emerald-500" : "text-amber-500"} />
-                        <span className="text-sm">{(parseFloat(signal.confidence_score) * 100).toFixed(0)}%</span>
+                        <span className={`text-sm ${archetype === 'The Hunter' ? 'font-mono' : ''}`}>
+                          {(parseFloat(signal.confidence_score) * 100).toFixed(0)}%
+                        </span>
                       </div>
                     </td>
                     <td className="px-6 py-4 text-sm text-slate-300">
                       {signal.region}
+                    </td>
+                    <td className="px-6 py-4">
+                      <div className="text-xs text-slate-400 truncate max-w-[200px]">
+                        {archetype === 'The Strategist' ? (
+                          <span className="text-blue-300 font-medium underline">View Context Graph</span>
+                        ) : archetype === 'The Guardian' && parseFloat(signal.confidence_score) < 0.6 ? (
+                          <span className="flex items-center gap-1 text-red-400 font-bold">
+                            <AlertTriangle size={12} /> Low Confidence Risk
+                          </span>
+                        ) : (
+                          JSON.stringify(signal.raw_payload)
+                        )}
+                      </div>
                     </td>
                     <td className="px-6 py-4 text-sm text-slate-400">
                       {new Date(signal.created_at).toLocaleString()}

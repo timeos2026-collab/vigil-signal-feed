@@ -46,11 +46,24 @@ const WEIGHTS: Record<string, number> = {
   dismiss: -10,
 };
 
+const CLUSTERS: Record<string, string[]> = {
+  energy: ['crude_oil', 'natural_gas', 'lng'],
+  minerals: ['lithium', 'cobalt', 'nickel', 'copper'],
+  refining: ['gasoline', 'diesel', 'jet_fuel'],
+};
+
+const getArchetype = (v: number, c: number, r: number) => {
+  if (v > (c + r) * 1.2) return 'The Hunter';
+  if (c > (v + r) * 1.2) return 'The Strategist';
+  if (r > (v + c) * 1.2) return 'The Guardian';
+  return 'The Generalist';
+};
+
 // Log interaction and update interests
 app.post('/api/interactions', authenticate, async (req: any, res) => {
   const client = await pool.connect();
   try {
-    const { signal_id, interaction_type } = req.body;
+    const { signal_id, interaction_type, is_discovery } = req.body;
     const userId = req.userId;
 
     if (!signal_id || !interaction_type || !WEIGHTS[interaction_type]) {
@@ -66,10 +79,15 @@ app.post('/api/interactions', authenticate, async (req: any, res) => {
     );
 
     // 2. Fetch signal details to know what dimensions to update
-    const signalResult = await client.query('SELECT region, array_to_json(commodity_tags) as commodity_tags FROM signals WHERE id = $1', [signal_id]);
+    const signalResult = await client.query('SELECT region, array_to_json(commodity_tags) as commodity_tags, raw_payload FROM signals WHERE id = $1', [signal_id]);
     if (signalResult.rows.length > 0) {
       const signal = signalResult.rows[0];
-      const weight = WEIGHTS[interaction_type];
+      let weight = WEIGHTS[interaction_type];
+
+      // Apply Discovery Multiplier (1.5x)
+      if (is_discovery) {
+        weight *= 1.5;
+      }
 
       const updates = [];
       
@@ -83,6 +101,24 @@ app.post('/api/interactions', authenticate, async (req: any, res) => {
         for (const tag of signal.commodity_tags) {
           updates.push({ dimension: 'commodity', entity: tag });
         }
+      }
+
+      // Archetype Scoring Logic (V, C, R)
+      const payload = signal.raw_payload || {};
+      
+      // V (Velocity): Sensor data, technical telemetry
+      if (payload.sensor_id || payload.source === 'AIS' || payload.source === 'PRODML' || payload.source_type === 'AIS' || payload.source_type === 'PRODML' || payload.source_type === 'WITSML' || payload.telemetry) {
+        updates.push({ dimension: 'archetype', entity: 'velocity' });
+      }
+      
+      // C (Context): Related signals, reports
+      if (payload.related_signals || payload.source === 'AssayReport' || payload.source_type === 'AssayReport' || payload.document_type === 'Regulatory') {
+        updates.push({ dimension: 'archetype', entity: 'context' });
+      }
+      
+      // R (Risk): Sanctions, weather, geopolitical
+      if (payload.risk_factor || payload.source === 'SanctionsList' || payload.source_type === 'SanctionsList' || payload.impact_level) {
+        updates.push({ dimension: 'archetype', entity: 'risk' });
       }
 
       for (const update of updates) {
@@ -110,9 +146,45 @@ app.post('/api/interactions', authenticate, async (req: any, res) => {
 // Real-time Signal Feed (Protected)
 app.get('/api/signals', authenticate, async (req: any, res) => {
   try {
-    const { commodity, region, min_confidence, personalized } = req.query;
+    const { commodity, region, min_confidence, personalized, deviceType, timeState } = req.query;
     const userId = req.userId;
-    
+
+    // Tempo Matching Default Values
+    let limit = 50;
+    let maxAge = '30 days'; // Default
+    let summarization = 'Detailed';
+
+    if (deviceType === 'Mobile') {
+      limit = 5;
+      maxAge = '1 hour';
+      summarization = 'Bullet';
+    }
+
+    if (timeState === 'Trading') {
+      maxAge = '5 minutes';
+      summarization = 'Raw';
+    }
+
+    // Fetch user archetype scores
+    const interactionCountResult = await pool.query(
+      "SELECT count(*) FROM user_interactions WHERE user_id = $1",
+      [userId]
+    );
+    const interactionCount = parseInt(interactionCountResult.rows[0].count);
+
+    let archetype = 'The Generalist';
+    if (interactionCount >= 50) {
+      const archetypeResult = await pool.query(
+        "SELECT entity, score FROM user_interests WHERE user_id = $1 AND dimension = 'archetype'",
+        [userId]
+      );
+      const scores = { velocity: 0, context: 0, risk: 0 };
+      archetypeResult.rows.forEach(row => {
+        if (row.entity in scores) (scores as any)[row.entity] = parseFloat(row.score);
+      });
+      archetype = getArchetype(scores.velocity, scores.context, scores.risk);
+    }
+
     let query = `
       SELECT 
         s.id, s.created_at, s.provider_id, s.raw_payload, 
@@ -122,16 +194,15 @@ app.get('/api/signals', authenticate, async (req: any, res) => {
     `;
     
     const params: any[] = [];
-    const conditions: string[] = [];
+    const conditions: string[] = ["s.created_at > now() - interval '" + maxAge + "'"];
 
     if (personalized === 'true') {
-      // Join with user interests to calculate personalized rank
-      // Simple ranking: BaseScore + sum of matching dimension scores
+      const pIdx = params.length + 1;
       query += `
         , (
           s.confidence_score + 
-          COALESCE((SELECT SUM(score) FROM user_interests WHERE user_id = $${params.length + 1} AND dimension = 'region' AND entity = s.region), 0) +
-          COALESCE((SELECT SUM(score) FROM user_interests WHERE user_id = $${params.length + 1} AND dimension = 'commodity' AND entity = ANY(s.commodity_tags::text[])), 0)
+          COALESCE((SELECT SUM(score) FROM user_interests WHERE user_id = $${pIdx} AND dimension = 'region' AND entity = s.region), 0) +
+          COALESCE((SELECT SUM(score) FROM user_interests WHERE user_id = $${pIdx} AND dimension = 'commodity' AND entity = ANY(s.commodity_tags::text[])), 0)
         ) as personal_rank
       `;
       params.push(userId);
@@ -159,13 +230,102 @@ app.get('/api/signals', authenticate, async (req: any, res) => {
     }
 
     if (personalized === 'true') {
-      query += ' ORDER BY personal_rank DESC, created_at DESC LIMIT 50';
+      query += ` ORDER BY personal_rank DESC, created_at DESC LIMIT $${params.length + 1}`;
+      params.push(limit);
     } else {
-      query += ' ORDER BY created_at DESC LIMIT 50';
+      query += ` ORDER BY created_at DESC LIMIT $${params.length + 1}`;
+      params.push(limit);
     }
 
-    const result = await pool.query(query, params);
-    res.json(result.rows);
+    const mainResult = await pool.query(query, params);
+    let signals = mainResult.rows;
+
+    // Discovery Logic (ε-Greedy)
+    if (personalized === 'true' && signals.length > 0) {
+      const epsilon = 0.10;
+      const discoveryCount = Math.max(1, Math.floor(signals.length * epsilon));
+      
+      const discoverySignals: any[] = [];
+      const seenIds = new Set(signals.map(s => s.id));
+
+      // 1. Proximity Discovery (50%) - Adjacent interests
+      const proxCount = Math.ceil(discoveryCount * 0.5);
+      if (proxCount > 0) {
+        const topCommodities = await pool.query(
+          "SELECT entity FROM user_interests WHERE user_id = $1 AND dimension = 'commodity' ORDER BY score DESC LIMIT 3",
+          [userId]
+        );
+        const relatedCommodities: string[] = [];
+        topCommodities.rows.forEach(row => {
+          for (const cluster in CLUSTERS) {
+            if (CLUSTERS[cluster].includes(row.entity)) {
+              relatedCommodities.push(...CLUSTERS[cluster].filter(c => c !== row.entity));
+            }
+          }
+        });
+
+        if (relatedCommodities.length > 0) {
+          const proxResult = await pool.query(`
+            SELECT s.*, array_to_json(s.commodity_tags) as commodity_tags 
+            FROM signals s
+            WHERE s.commodity_tags && $1::commodity_type[]
+            AND s.id NOT IN (SELECT signal_id FROM user_interactions WHERE user_id = $2)
+            AND s.id != ALL($3::uuid[])
+            ORDER BY RANDOM()
+            LIMIT $4
+          `, [relatedCommodities, userId, Array.from(seenIds), proxCount]);
+          proxResult.rows.forEach(s => {
+            discoverySignals.push({ ...s, is_discovery: true });
+            seenIds.add(s.id);
+          });
+        }
+      }
+
+      // 2. Global Heat Discovery (30%)
+      const heatCount = Math.ceil(discoveryCount * 0.3);
+      if (heatCount > 0 && discoverySignals.length < discoveryCount) {
+        const heatResult = await pool.query(`
+          SELECT s.*, array_to_json(s.commodity_tags) as commodity_tags, COUNT(ui.id) as interaction_count
+          FROM signals s
+          LEFT JOIN user_interactions ui ON s.id = ui.signal_id
+          WHERE s.id NOT IN (SELECT signal_id FROM user_interactions WHERE user_id = $1)
+          AND s.id != ALL($2::uuid[])
+          GROUP BY s.id
+          ORDER BY interaction_count DESC, created_at DESC
+          LIMIT $3
+        `, [userId, Array.from(seenIds), heatCount]);
+        heatResult.rows.forEach(s => {
+          discoverySignals.push({ ...s, is_discovery: true });
+          seenIds.add(s.id);
+        });
+      }
+
+      // 3. Random Seed (Remaining)
+      const randomCount = discoveryCount - discoverySignals.length;
+      if (randomCount > 0) {
+        const randomResult = await pool.query(`
+          SELECT s.*, array_to_json(s.commodity_tags) as commodity_tags 
+          FROM signals s
+          WHERE s.id NOT IN (SELECT signal_id FROM user_interactions WHERE user_id = $1)
+          AND s.id != ALL($2::uuid[])
+          AND s.confidence_score > 0.7
+          ORDER BY RANDOM()
+          LIMIT $3
+        `, [userId, Array.from(seenIds), randomCount]);
+        randomResult.rows.forEach(s => {
+          discoverySignals.push({ ...s, is_discovery: true });
+        });
+      }
+      
+      // Inject discovery signals
+      signals = [...signals.slice(0, signals.length - discoverySignals.length), ...discoverySignals];
+    }
+
+    res.json({
+      archetype,
+      summarization,
+      signals
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Internal server error' });
