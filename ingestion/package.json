@@ -5,6 +5,9 @@
   "main": "index.js",
   "scripts": {
     "dev": "tsx src/index.ts",
+    "scrape-ga": "tsx src/arcgis_scraper.ts",
+    "scrape-zambia": "tsx src/zambia_scraper.ts",
+    "scrape-drc": "tsx src/drc_scraper.ts",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
@@ -19,6 +22,7 @@
   },
   "dependencies": {
     "@types/pg": "^8.20.0",
+    "axios": "^1.17.0",
     "dotenv": "^17.4.2",
     "pg": "^8.21.0"
   }
